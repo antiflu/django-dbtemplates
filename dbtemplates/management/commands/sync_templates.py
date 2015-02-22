@@ -1,15 +1,34 @@
 import os
 import codecs
+import sys
 from optparse import make_option
 
 from django.contrib.sites.models import Site
 from django.core.management.base import CommandError, NoArgsCommand
-from django.template.loaders.app_directories import app_template_dirs
 
 from dbtemplates.conf import settings
 from dbtemplates.models import Template
 
 ALWAYS_ASK, FILES_TO_DATABASE, DATABASE_TO_FILES = ('0', '1', '2')
+
+from django.apps import apps
+from django.utils import six
+
+
+def calculate_app_template_dirs():
+    if six.PY2:
+        fs_encoding = sys.getfilesystemencoding() or sys.getdefaultencoding()
+    app_template_dirs = []
+    for app_config in apps.get_app_configs():
+        if not app_config.path:
+            continue
+        template_dir = os.path.join(app_config.path, 'templates')
+        full_template_dir = os.path.join(settings.BASE_DIR, template_dir) if not template_dir.startswith('/') else template_dir 
+        if os.path.isdir(full_template_dir):
+            if six.PY2:
+                full_template_dir = full_template_dir.decode(fs_encoding)
+            app_template_dirs.append(full_template_dir)
+    return tuple(app_template_dirs)
 
 
 class Command(NoArgsCommand):
@@ -36,6 +55,7 @@ class Command(NoArgsCommand):
                     help="Delete templates after syncing"))
 
     def handle_noargs(self, **options):
+        app_template_dirs = calculate_app_template_dirs()
         extension = options.get('ext')
         force = options.get('force')
         overwrite = options.get('overwrite')
@@ -61,6 +81,7 @@ class Command(NoArgsCommand):
             tpl_dirs = settings.TEMPLATE_DIRS + app_template_dirs
         templatedirs = [d for d in tpl_dirs if os.path.isdir(d)]
 
+        done = []
         for templatedir in templatedirs:
             for dirpath, subdirs, filenames in os.walk(templatedir):
                 for f in [f for f in filenames
@@ -83,6 +104,7 @@ class Command(NoArgsCommand):
                             t.save()
                             t.sites.add(site)
                     else:
+                        done.append(name)
                         while 1:
                             if overwrite == ALWAYS_ASK:
                                 confirm = raw_input(
@@ -113,3 +135,14 @@ class Command(NoArgsCommand):
                                     if delete:
                                         t.delete()
                                 break
+        templates_left = [t for t in Template.objects.exclude(name__in=done) if t.name.endswith(extension)]
+        full_app_template_dirs = [os.path.join(settings.BASE_DIR, a) if not a.startswith(a) else a for a in app_template_dirs]
+        folder = [a for a in full_app_template_dirs if a.startswith(settings.BASE_DIR)][0]
+        for t in templates_left:
+            path = os.path.join(folder, t.name)
+            f = codecs.open(path, 'w', 'utf-8')
+            try:
+                f.write(t.content)
+            finally:
+                f.close()
+
